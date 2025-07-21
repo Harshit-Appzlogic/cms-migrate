@@ -9,10 +9,11 @@ from rich.console import Console
 from rich.progress import Progress
 from dotenv import load_dotenv
 
-from models import ComponentResult, ComponentSchema, ExtractedContent, PageInfo, MigrationResults
-from html_parser import HTMLParser, ContentExtractor
+from models import ComponentResult, ComponentSchema, ExtractedContent, PageInfo, MigrationResults, get_content_types
+from html_parser import find_content_sections, get_fallback_text
 from ai_classifier import AIClassifier, SchemaGenerator
-from schema_creator import SchemaCreator, SchemaValidator, SchemaEnhancer
+from schema_creator import create_schema, is_schema_good
+from component_patterns import ComponentPatternDetector
 from database import db_manager
 
 load_dotenv()
@@ -24,25 +25,24 @@ class MigrationSystem:
     
     def __init__(self, api_key: str = None):
         # Get API key from environment if not provided
-        self.api_key = api_key or os.getenv("COHERE_API_KEY")
+        # self.api_key = api_key or os.getenv("COHERE_API_KEY")
+        # self.api_key = api_key or os.getenv("GEMINI_API_KEY")
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         
         if not self.api_key:
             raise ValueError("Need a Cohere API key to work with AI")
         
         # Set up our components
-        self.html_parser = HTMLParser()
-        self.content_extractor = ContentExtractor()
         self.ai_classifier = AIClassifier(self.api_key)
         self.schema_generator = SchemaGenerator(self.api_key)
-        self.schema_creator = SchemaCreator()
-        self.schema_validator = SchemaValidator()
-        self.schema_enhancer = SchemaEnhancer()
+        self.pattern_detector = ComponentPatternDetector()
         
         # Keep track of what we find
         self.page_info: List[PageInfo] = []
         self.content_results: Dict[str, List[ComponentResult]] = {}
         self.schemas: Dict[str, ComponentSchema] = {}
         self.extracted_content: List[ExtractedContent] = []
+        self.reusable_patterns = {}  # Store reusable component patterns
     
     def migrate_content(self, html_folder: str) -> MigrationResults:
         """Run the complete migration process"""
@@ -57,13 +57,16 @@ class MigrationSystem:
             # Step 1: Analyze all the HTML files
             self._analyze_html_files(html_folder)
             
-            # Step 2: Create schemas for the content types we found
+            # Step 2: Detect reusable component patterns
+            self._detect_reusable_patterns()
+            
+            # Step 3: Create schemas for the content types we found
             self._create_content_schemas()
             
-            # Step 3: Extract structured data using our schemas
+            # Step 4: Extract structured data using our schemas
             self._extract_structured_data(html_folder)
             
-            # Step 4: Save everything and create output files
+            # Step 5: Save everything and create output files
             output_files = self._save_results()
             
             # Calculate how long it took
@@ -100,14 +103,14 @@ class MigrationSystem:
         """Analyze one HTML file"""
         try:
             # Find interesting content sections
-            sections = self.html_parser.find_content_sections(html_file)
+            sections = find_content_sections(html_file)
             
             # Classify each section with AI
             file_results = []
             content_types_found = []
             
             for section in sections:
-                result = self.ai_classifier.classify_content(section, html_file.name)
+                result = self.ai_classifier.classify_content(section, html_file.name, html_file)
                 
                 if result.looks_good():
                     file_results.append(result)
@@ -135,9 +138,42 @@ class MigrationSystem:
         except Exception as e:
             console.print(f"❌ Couldn't analyze {html_file.name}: {e}", style="red")
     
+    def _detect_reusable_patterns(self):
+        """Detect reusable component patterns across all analyzed content"""
+        console.print("\n🔄 Detecting reusable component patterns", style="bold blue")
+        
+        # Convert content results to format expected by pattern detector
+        all_results = []
+        for content_type, results in self.content_results.items():
+            for result in results:
+                all_results.append({
+                    'content_type': result.content_type,
+                    'source_file': result.source_file,
+                    'confidence': result.confidence,
+                    'fields': result.fields
+                })
+        
+        # Detect patterns
+        self.reusable_patterns = self.pattern_detector.detect_patterns(all_results)
+        
+        # Display results
+        reusable_count = len(self.reusable_patterns)
+        total_types = len(self.content_results)
+        
+        console.print(f"📊 Found {reusable_count} reusable patterns out of {total_types} content types")
+        
+        for pattern_type, pattern_info in self.reusable_patterns.items():
+            score = pattern_info['reusability_score']
+            instances = pattern_info['instances_count']
+            console.print(f"  🔧 {pattern_type}: {score:.2f} score, {instances} instances", style="cyan")
+    
     def _create_content_schemas(self):
         """Create schemas for all the content types we found"""
         console.print("\n🔧 Creating content schemas", style="bold blue")
+        
+        # Show what types we found
+        all_types = get_content_types()
+        console.print(f"📋 Content types we know: {', '.join(all_types)}", style="cyan")
         
         for content_type, results in self.content_results.items():
             if not results:
@@ -150,17 +186,22 @@ class MigrationSystem:
             
             if ai_schema and 'fields' in ai_schema:
                 # Create the schema object
-                schema = self.schema_creator.create_schema(content_type, ai_schema['fields'])
+                schema = create_schema(content_type, ai_schema['fields'])
                 
                 # Make sure it's valid
-                if self.schema_validator.validate_schema(schema):
-                    # Add useful fields
-                    enhanced_schema = self.schema_enhancer.enhance_schema(schema)
-                    
-                    self.schemas[content_type] = enhanced_schema
+                if is_schema_good(schema):
+                    self.schemas[content_type] = schema
                     
                     # Save to database
-                    db_manager.save_component_schema(enhanced_schema.to_cms_format())
+                    db_manager.save_component_schema(schema.to_cms_format())
+                    
+                    # Keep track of this type
+                    type_info = {
+                        "type": content_type,
+                        "example_count": len(results),
+                        "found_at": datetime.now().isoformat()
+                    }
+                    db_manager.save_component_type(type_info)
                 else:
                     console.print(f"⚠️  Schema for {content_type} didn't pass validation", style="yellow")
     
@@ -180,11 +221,11 @@ class MigrationSystem:
     def _extract_from_file(self, html_file: Path):
         """Extract structured data from one file"""
         try:
-            sections = self.html_parser.find_content_sections(html_file)
+            sections = find_content_sections(html_file)
             
             for section in sections:
                 # Classify the section
-                result = self.ai_classifier.classify_content(section, html_file.name)
+                result = self.ai_classifier.classify_content(section, html_file.name, html_file)
                 
                 if result.looks_good() and result.content_type in self.schemas:
                     # Extract data for each field in the schema
@@ -195,9 +236,9 @@ class MigrationSystem:
                         # Try to get the value from AI results first
                         value = result.fields.get(field.name)
                         
-                        # If not found, try to extract from HTML
+                        # If not found, try simple fallback
                         if not value:
-                            value = self.content_extractor.get_field_value(section, field.name)
+                            value = get_fallback_text(section, field.name)
                         
                         extracted_data[field.name] = value
                     
@@ -252,16 +293,30 @@ class MigrationSystem:
         output_files["extracted_data"] = str(data_file)
         console.print(f"✅ Saved {data_file.name}")
         
+        # Generate CMS components from reusable patterns
+        cms_components = self._generate_cms_components()
+        
+        # Save CMS components file
+        components_file = output_dir / f"reusable_components_{timestamp}.json"
+        with open(components_file, 'w') as f:
+            json.dump(cms_components, f, indent=2)
+        output_files["components"] = str(components_file)
+        console.print(f"✅ Saved {components_file.name}")
+        
         # Save migration report
         report = {
             "migration_date": datetime.now().isoformat(),
             "summary": {
                 "schemas_created": len(self.schemas),
                 "content_extracted": len(self.extracted_content),
-                "content_types": list(self.schemas.keys())
+                "content_types": list(self.schemas.keys()),
+                "reusable_patterns": len(self.reusable_patterns),
+                "reusability_score": self._calculate_overall_reusability()
             },
             "page_info": [info.to_dict() for info in self.page_info],
-            "schemas": schemas_data
+            "schemas": schemas_data,
+            "reusable_patterns": self.reusable_patterns,
+            "cms_components": cms_components
         }
         
         report_file = output_dir / f"migration_report_{timestamp}.json"
@@ -271,6 +326,97 @@ class MigrationSystem:
         console.print(f"✅ Saved {report_file.name}")
         
         return output_files
+    
+    def _generate_cms_components(self) -> dict:
+        """Generate CMS component definitions from reusable patterns"""
+        cms_components = {}
+        
+        for pattern_type, pattern_info in self.reusable_patterns.items():
+            component_name = pattern_info['template']['component_name']
+            
+            # Create CMS component schema
+            cms_component = {
+                "name": component_name,
+                "display_name": pattern_type.replace('-', ' ').title(),
+                "description": pattern_info['template']['description'],
+                "category": self._determine_component_category(pattern_type),
+                "reusable": True,
+                "instances_count": pattern_info['instances_count'],
+                "reusability_score": pattern_info['reusability_score'],
+                "usage_contexts": pattern_info['usage_contexts'],
+                "fields": []
+            }
+            
+            # Add field definitions
+            for field_name in pattern_info['common_fields']:
+                field_info = pattern_info['template']['fields'].get(field_name, {})
+                
+                cms_field = {
+                    "name": field_name,
+                    "display_name": field_name.replace('_', ' ').title(),
+                    "type": self._map_to_cms_field_type(field_info.get('data_type', 'str')),
+                    "required": field_info.get('required', False),
+                    "component_role": field_info.get('component_type', 'content')
+                }
+                
+                # Add field-specific configuration
+                if field_info.get('component_type') == 'navigation':
+                    cms_field.update({
+                        "type": "array",
+                        "item_type": "link",
+                        "typical_count": int(field_info.get('average_items', 5))
+                    })
+                elif field_info.get('component_type') == 'rich_text':
+                    cms_field.update({
+                        "type": "rich_text",
+                        "multiline": True,
+                        "content_heavy": field_info.get('is_content_heavy', False)
+                    })
+                elif field_info.get('component_type') == 'heading':
+                    cms_field.update({
+                        "type": "text",
+                        "is_title_field": True,
+                        "variable_content": field_info.get('is_unique_content', False)
+                    })
+                
+                cms_component["fields"].append(cms_field)
+            
+            cms_components[component_name] = cms_component
+        
+        return cms_components
+    
+    def _determine_component_category(self, pattern_type: str) -> str:
+        """Determine CMS component category"""
+        if 'navigation' in pattern_type or 'menu' in pattern_type:
+            return 'navigation'
+        elif 'product' in pattern_type or 'showcase' in pattern_type:
+            return 'commerce'
+        elif 'recipe' in pattern_type or 'article' in pattern_type:
+            return 'content'
+        elif 'form' in pattern_type:
+            return 'interactive'
+        else:
+            return 'general'
+    
+    def _map_to_cms_field_type(self, data_type: str) -> str:
+        """Map Python data types to CMS field types"""
+        mapping = {
+            'str': 'text',
+            'list': 'array',
+            'int': 'number',
+            'float': 'number',
+            'bool': 'boolean',
+            'dict': 'object'
+        }
+        return mapping.get(data_type, 'text')
+    
+    def _calculate_overall_reusability(self) -> float:
+        """Calculate overall reusability score for the migration"""
+        if not self.reusable_patterns:
+            return 0.0
+        
+        total_score = sum(pattern['reusability_score'] for pattern in self.reusable_patterns.values())
+        return round(total_score / len(self.reusable_patterns), 2)
 
 
 def main():

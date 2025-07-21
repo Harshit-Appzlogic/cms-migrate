@@ -1,8 +1,17 @@
-beautifulsoup4==4.13.4
-cohere==5.16.1
-pymongo==4.13.2
-python-dotenv==1.1.1
-lxml==6.0.0
-pandas==2.3.1
-requests==2.32.4
-rich==14.0.0
+beautifulsoup4==4.12.2
+cohere==4.39.0
+pymongo==4.6.1
+python-dotenv==1.0.0
+lxml==4.9.4
+pandas==2.2.0
+requests==2.31.0
+rich==13.7.0
+google-genai
+
+# Development dependencies (optional: include with --extra-index-url if needed for separation)
+pytest==7.4.4
+black==23.12.1
+flake8==7.0.0
+isort==5.13.2
+openai
+playwright

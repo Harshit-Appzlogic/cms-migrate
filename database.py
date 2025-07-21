@@ -117,18 +117,30 @@ class DatabaseManager:
     
     def save_component_schema(self, schema: Dict[str, Any]) -> str:
         """
-        Save a component schema to database
+        Save a component schema to database (replaces if exists)
         
         Args:
             schema: Component schema dictionary
             
         Returns:
-            str: Inserted document ID
+            str: Document ID (inserted or updated)
         """
         collection = self.get_collection("component_schemas")
-        result = collection.insert_one(schema)
-        logger.info(f"Saved component schema: {schema.get('title', 'Unknown')}")
-        return str(result.inserted_id)
+        
+        # Use replace_one with upsert to handle duplicates
+        filter_criteria = {"uid": schema.get("uid")}
+        result = collection.replace_one(filter_criteria, schema, upsert=True)
+        
+        if result.upserted_id:
+            doc_id = str(result.upserted_id)
+            logger.info(f"Inserted new component schema: {schema.get('title', 'Unknown')}")
+        else:
+            # Find the existing document to get its ID
+            existing_doc = collection.find_one(filter_criteria)
+            doc_id = str(existing_doc["_id"]) if existing_doc else "unknown"
+            logger.info(f"Updated existing component schema: {schema.get('title', 'Unknown')}")
+        
+        return doc_id
     
     def save_extracted_data(self, data: Dict[str, Any]) -> str:
         """

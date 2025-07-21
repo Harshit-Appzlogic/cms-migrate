@@ -1,42 +1,55 @@
-"""
-AI classifier that figures out what type of content we're looking at
-"""
 import json
 import re
-import cohere
+# import cohere
 from bs4 import Tag
+# from google import genai
+from openai import OpenAI
 
-from models import ComponentResult, COMPONENT_TYPES
+from models import ComponentResult, add_content_type, get_content_types
+from smart_parser import extract_smart_content
+from enhanced_content_detection import EnhancedContentDetector, create_enhanced_ai_prompt
 
 
 class AIClassifier:
     """Uses AI to figure out what type of content we're looking at"""
     
     def __init__(self, api_key: str):
-        self.cohere = cohere.Client(api_key)
-        self.component_types = COMPONENT_TYPES
+        # self.cohere = cohere.Client(api_key)
+        self.client = OpenAI(api_key=api_key)
+        self.page_context = None  # Store page context for better classification
+        self.content_detector = EnhancedContentDetector()  # Enhanced content detection
     
-    def classify_content(self, section: Tag, filename: str) -> ComponentResult:
+    def classify_content(self, section: Tag, filename: str, html_file=None) -> ComponentResult:
         """Look at a section of HTML and figure out what type of content it is"""
         try:
-            # Get the HTML and text in manageable chunks
-            html_snippet = self._get_html_snippet(section)
-            text_content = self._get_text_content(section)
+            # Step 1: Enhanced content detection (pre-analysis)
+            detected_type, confidence, pre_fields = self.content_detector.detect_content_type(section)
             
-            # Ask the AI what it thinks this is
-            prompt = self._create_prompt(html_snippet, text_content)
+            # Step 2: Use smart parsing for structured data
+            smart_data = extract_smart_content(section)
+            
+            # Step 3: Skip page context for now (removed dependency)
+            
+            # Step 4: Create enhanced AI prompt with pre-analysis
+            prompt = create_enhanced_ai_prompt(section, detected_type, confidence, pre_fields, get_content_types())
             response = self._ask_ai(prompt)
             
             # Parse the AI's response
             result = self._parse_ai_response(response)
             
             if result:
+                content_type = result.get('type', 'unknown')
+                confidence = result.get('confidence', 0.0)
+                
+                # Learn new content types as we find them
+                add_content_type(content_type)
+                
                 return ComponentResult(
-                    content_type=result.get('type', 'unknown'),
-                    confidence=result.get('confidence', 0.0),
+                    content_type=content_type,
+                    confidence=confidence,
                     fields=result.get('fields', {}),
                     source_file=filename,
-                    html_content=html_snippet
+                    html_content=smart_data['clean_html']
                 )
             
             # If we couldn't parse the response, return unknown
@@ -45,7 +58,7 @@ class AIClassifier:
                 confidence=0.0,
                 fields={},
                 source_file=filename,
-                html_content=html_snippet
+                html_content=smart_data.get('clean_html', '') if 'smart_data' in locals() else ""
             )
             
         except Exception as e:
@@ -69,41 +82,112 @@ class AIClassifier:
         text = section.get_text(strip=True)
         return text[:800]
     
+    def _create_smart_prompt(self, smart_data: dict, filename: str) -> str:
+        """Create a prompt using smart parsed data"""
+        current_types = get_content_types()
+        types_we_know = ', '.join(current_types)
+        
+        # Page context removed for now
+        context_info = ""
+        
+        structured = smart_data['structured']
+        
+        return f"""###Instruction###
+You are an expert HTML content classifier. Your task is to analyze structured web content and classify it precisely. You MUST extract specific field values, not generic text.
+
+I'm going to tip $200 for a better solution!
+{context_info}
+###Structured Data###
+Headings: {structured['headings'][:3]}  # First 3 headings
+Links: {len(structured['links'])} links found - Sample: {[link['text'] for link in structured['links'][:5]]}
+Images: {len(structured['images'])} images - Sample alt text: {[img['alt'] for img in structured['images'][:3]]}
+Forms: {len(structured['forms'])} forms found
+Lists: {len(structured['lists'])} list items - Sample: {structured['lists'][:3]}
+
+###Clean HTML###
+{smart_data['clean_html']}
+
+###Semantic Text###
+{smart_data['semantic_text']}
+
+###Known Types###
+{types_we_know}
+
+###Requirements###
+1. Classify into specific types: magazine-section, product-showcase, store-locator, membership-info, navigation-menu, search-form, content-article, recipe-card, etc.
+2. Extract SPECIFIC values from the structured data above - use headings for titles, links for navigation, etc.
+3. Use page context to inform classification
+
+You MUST return valid JSON:
+{{
+  "type": "specific-content-type",
+  "confidence": 0.9,
+  "fields": {{
+    "title": "actual title from headings",
+    "links": ["actual link texts"],
+    "description": "specific description found"
+  }}
+}}"""
+
     def _create_prompt(self, html: str, text: str) -> str:
         """Create a prompt to ask the AI what this content is"""
-        types_list = ', '.join(self.component_types)
+        current_types = get_content_types()
+        types_we_know = ', '.join(current_types)
         
-        return f"""Look at this HTML section and tell me what type of content it is.
+        return f"""###Instruction###
+You are an expert HTML content classifier and data extractor. Your task is to analyze HTML content and extract specific structured data. You MUST classify content into precise types and extract exact field values. You will be penalized for generic classifications or returning full text instead of specific values.
 
-HTML:
+I'm going to tip $200 for a better solution!
+
+###Example###
+HTML: <div class="product"><h2>iPhone 15 Pro</h2><p>$999</p><p>Latest smartphone</p></div>
+Output: {{"type": "product", "confidence": 0.95, "fields": {{"title": "iPhone 15 Pro", "price": "$999", "description": "Latest smartphone"}}}}
+
+HTML: <nav><a href="/home">Home</a><a href="/about">About</a></nav>
+Output: {{"type": "navigation", "confidence": 0.9, "fields": {{"links": ["Home", "About"]}}}}
+
+###Task###
+Analyze this HTML content step by step:
+
+=== HTML ===
 {html}
 
-Text content:
+=== Text ===
 {text}
 
-What type of content is this? Choose from: {types_list}
+=== Previous Types ===
+{types_we_know}
 
-Also extract any key information you can find (like title, description, etc.).
+###Requirements###
+1. Create specific content type names (product, hero-banner, testimonial, store-locator, membership-info, pricing-table, contact-form, etc.)
+2. Extract SPECIFIC values for each field - not generic text
+3. Confidence must reflect actual match quality
+4. Field names must describe the actual content
 
-Please respond with JSON like this:
+You MUST return valid JSON with this exact structure:
 {{
-  "type": "recipe",
-  "confidence": 0.85,
+  "type": "specific-content-type",
+  "confidence": 0.8,
   "fields": {{
-    "title": "Chocolate Cake Recipe",
-    "description": "A delicious chocolate cake"
+    "field_name": "specific_extracted_value"
   }}
 }}"""
     
     def _ask_ai(self, prompt: str) -> str:
         """Ask the AI and get its response"""
-        response = self.cohere.chat(
-            model="command-r-plus",
-            message=prompt,
+        # response = self.cohere.chat(
+        #     model="command-r-plus-08-2024",
+        #     message=prompt,
+        #     max_tokens=800,
+        #     temperature=0.1  # Keep it focused
+        # )
+        response = self.client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
             max_tokens=800,
-            temperature=0.1  # Keep it focused
+            temperature=0.1
         )
-        return response.text.strip()
+        return response.choices[0].message.content.strip()
     
     def _parse_ai_response(self, response: str) -> dict:
         """Try to parse the AI's JSON response"""
@@ -123,7 +207,8 @@ class SchemaGenerator:
     """Uses AI to generate schemas for content types"""
     
     def __init__(self, api_key: str):
-        self.cohere = cohere.Client(api_key)
+        # self.cohere = cohere.Client(api_key)
+        self.client = OpenAI(api_key=api_key)
     
     def generate_schema(self, content_type: str, examples: list) -> dict:
         """Generate a schema for a content type based on examples"""
@@ -149,52 +234,69 @@ class SchemaGenerator:
     
     def _create_schema_prompt(self, content_type: str, examples: list) -> str:
         """Create a prompt to generate a schema"""
-        return f"""I need to create a schema for {content_type} content based on these examples:
+        return f"""###Instruction###
+You are an expert CMS schema architect. Your task is to create comprehensive content schemas for {content_type} content. You MUST analyze field patterns and create optimal schema definitions. You will be penalized for missing important fields or incorrect field types.
 
-Examples:
+I'm going to tip $150 for a better solution!
+
+###Example###
+Examples: [{{"title": "Product A", "price": "$99", "description": "Good product"}}]
+Output: {{"fields": {{"title": {{"type": "text", "required": true, "multiline": false}}, "price": {{"type": "text", "required": true, "multiline": false}}, "description": {{"type": "text", "required": false, "multiline": true}}}}}}
+
+###Task###
+Analyze these {content_type} examples step by step:
+
+=== Examples ===
 {json.dumps(examples, indent=2)}
 
-Please create a comprehensive schema that includes:
-- All the important fields found in the examples
-- Appropriate field types (text, file, number, boolean, date)
-- Which fields are required vs optional
-- Which text fields should be multiline
-- Any enum values for dropdown fields
+###Requirements###
+1. Include ALL fields that appear in examples
+2. Use correct field types: text, file, number, boolean, date
+3. Mark frequently appearing fields as required
+4. Set multiline=true for long descriptions
+5. Identify enum values for consistent dropdown options
 
-Respond with JSON like this:
+You MUST return valid JSON with this structure:
 {{
   "fields": {{
-    "title": {{
-      "type": "text",
-      "required": true,
-      "multiline": false
-    }},
-    "description": {{
-      "type": "text",
-      "required": false,
-      "multiline": true
+    "field_name": {{
+      "type": "text|file|number|boolean|date",
+      "required": true|false,
+      "multiline": true|false
     }}
   }}
 }}"""
     
     def _ask_ai(self, prompt: str) -> str:
         """Ask the AI for a schema"""
-        response = self.cohere.chat(
-            model="command-r-plus",
-            message=prompt,
-            max_tokens=1000,
+        # response = self.cohere.chat(
+        #     model="command-r-plus",
+        #     message=prompt,
+        #     max_tokens=1000,
+        #     temperature=0.1
+        # )
+
+        response = self.client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=800,
             temperature=0.1
         )
-        return response.text.strip()
-    
+        return response.choices[0].message.content.strip()
+
     def _parse_schema_response(self, response: str) -> dict:
         """Parse the AI's schema response"""
         try:
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if json_match:
                 json_str = json_match.group(0)
-                return json.loads(json_str)
-        except json.JSONDecodeError:
-            pass
+                parsed = json.loads(json_str)
+                return parsed
+        except json.JSONDecodeError as e:
+            print(f"JSON decode error: {e}")
+            print(f"Response was: {response[:200]}...")
+        except Exception as e:
+            print(f"Schema parsing error: {e}")
         
-        return None
+        print("⚠️ Failed to parse schema response, returning empty schema")
+        return {"fields": {}}

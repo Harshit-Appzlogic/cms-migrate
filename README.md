@@ -1,117 +1,133 @@
-### Components
+## Project Structure Overview
 
-- **`models.py`** - Simple data structures for everything we work with
-- **`html_parser.py`** - Finds interesting content in HTML files
-- **`ai_classifier.py`** - Uses AI to figure out what type of content each section is
-- **`schema_creator.py`** - Creates CMS schemas from AI analysis
-- **`database.py`** - Handles saving and loading data from MongoDB
-- **`migration_system.py`** - The main system that coordinates everything
+| File/Folder                     | Description                                    |
+| ------------------------------- | ---------------------------------------------- |
+| `scraper.py`                    | Interactive Playwright-based scraper with head navigation for now.           |
+| `scrap/`                        | Folder where HTML and metadata are saved       |
+| `migration_system.py`           | Orchestrates the migration pipeline            |
+| `ai_classifier.py`              | AI logic for classifying HTML sections         |
+| `schema_creator.py`             | Generates component schema from field data     |
+| `html_parser.py`                | Parses meaningful HTML content blocks          |
+| `enhanced_content_detection.py` | Detects patterns before AI prompt              |
+| `component_patterns.py`         | Finds reusable design/component patterns       |
+| `smart_parser.py`               | Extracts structured, semantic HTML data        |
+| `database.py`                   | MongoDB persistence for all entities           |
+| `main.py`                       | Main entry point for full migration            |
+| `migration_outputs/`            | Final JSON outputs (schemas, content, reports) |
 
-## Requirements
+---
 
-- Python 3.9+
-- MongoDB
-- A Cohere API key (sign up at [cohere.ai](https://dashboard.cohere.com/api-keys))
+## Prerequisites
 
-### Quick Setup
+* Python 3.9+
+* [Playwright](https://playwright.dev/python/docs/intro)
+* MongoDB installed locally or via Atlas
+* OpenAI API key (uses GPT-4o-mini)
 
-1. **Unzip the scrap files into /scrap**
+---
 
-2. **Clone**
-   ```bash
-   # clone this repository
-   cd smart-cms-migration
-   ```
+## Setup Guide
 
-3. **Set up Python environment**
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   ```
-
-4. **Install required packages**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-5. **Configure your API key**
-   ```bash
-   cp .env.template .env
-   # Edit .env and add your Cohere API key
-   ```
-
-6. **Start MongoDB**
-   ```bash
-   # Ubuntu/Debian
-   sudo systemctl start mongod
-   
-   # macOS
-   brew services start mongodb-community
-   
-   # Windows
-   net start MongoDB
-   ```
-
-### Usage
+### 1. Clone the Repository
 
 ```bash
-# Analyze all HTML files in the scrap/ folder
+git clone https://github.com/your-org/smart-cms-migration.git
+cd smart-cms-migration
+```
+
+### 2. Create Python Environment
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+```
+
+### 3. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+playwright install
+```
+
+### 4. Set Environment Variables
+
+```bash
+cp .env.template .env
+# Open .env and set:
+OPENAI_API_KEY=your_key_here
+MONGODB_URI=mongodb://localhost:27017/
+MONGODB_DATABASE=cms_migration
+```
+
+---
+
+### Scraper
+
+```bash
+python scraper.py
+```
+
+* Choose single URL, multiple URLs, or a file of URLs
+* Paste your URL
+* Wait for page to load completely
+* Press enter in terminal
+
+---
+
+## Full Migration Pipeline
+
+Once the `scrap/` folder contains HTML files:
+
+```bash
 python main.py
 ```
 
-## Result
+This will:
 
-The system creates several useful files:
+1. Analyze each HTML file
+2. Run AI classification per content block
+3. Generate CMS schemas for all content types
+4. Extract structured content into a normalized format
+5. Detect reusable component patterns
+6. Save output in `migration_outputs/`
 
-- **`content_schemas_*.json`** - Ready-to-use CMS schemas
-- **`extracted_content_*.json`** - All your content in structured format
-- **`migration_report_*.json`** - Complete analysis and summary
+---
 
-### Comp Schema
+## Output Files
+
+| File                                   | Description                     |
+| -------------------------------------- | ------------------------------- |
+| `content_schemas_<timestamp>.json`     | Component schemas for CMS       |
+| `extracted_content_<timestamp>.json`   | Structured content extracted    |
+| `reusable_components_<timestamp>.json` | Identified reusable UI patterns |
+| `migration_report_<timestamp>.json`    | Full summary of migration run   |
+
+---
+
+## MongoDB Collections
+
+| Collection          | Data                                     |
+| ------------------- | ---------------------------------------- |
+| `component_schemas` | Saved schemas                            |
+| `extracted_data`    | Structured blocks with confidence scores |
+| `component_types`   | Discovered types with metadata           |
+| `page_types`        | Per-page analysis summary                |
+
+---
+
+
+## Sample Component Schema Output
 
 ```json
 {
   "title": "Headline",
-  "uid": "headline",
+  "uid": "headline_component",
   "schema": [
     {
       "uid": "headline_text",
       "data_type": "text",
       "display_name": "Headline Text",
-      "mandatory": true,
-      "field_metadata": {
-        "multiline": false
-      }
-    },
-    {
-      "uid": "color",
-      "data_type": "text",
-      "display_name": "Color",
-      "mandatory": false,
-      "field_metadata": {
-        "enum": [
-          {
-            "value": "black",
-            "label": "Black"
-          },
-          {
-            "value": "white",
-            "label": "White"
-          },
-          {
-            "value": "red",
-            "label": "Red"
-          },
-          {
-            "value": "blue",
-            "label": "Blue"
-          },
-          {
-            "value": "custom",
-            "label": "Custom (enter hex)"
-          }
-        ]
-      }
+      "mandatory": true
     }
   ],
   "options": {
@@ -119,16 +135,5 @@ The system creates several useful files:
     "is_page": false,
     "title": "headline_text"
   },
-  "description": "A simple component to define a styled headline.",
-  "content_type_uid": "headline_component"
+  "description": "A styled headline component."
 }
-```
-
-## Database
-
-### Saved in MongoDB
-
-- **`component_schemas`** - CMS schemas
-- **`extracted_data`** - Extracted content
-- **`component_types`** - Stats about content types
-- **`page_types`** - Info about each type of HTML page analyzed(recipe, members and others)

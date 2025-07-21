@@ -6,12 +6,20 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 
 
-# What types of content can we find?
-COMPONENT_TYPES = [
-    "recipe", "article", "teaser", "poll", "banner", 
-    "gallery", "navigation", "form", "headline", "quote", 
-    "list", "unknown"
-]
+# We start with basic types but discover more as we go
+known_content_types = ["article", "navigation", "form", "unknown"]
+
+def add_content_type(new_type):
+    """Add a new content type if we haven't seen it before"""
+    if new_type and new_type not in known_content_types:
+        known_content_types.append(new_type)
+        print(f"🆕 Found new content type: {new_type}")
+        return True
+    return False
+
+def get_content_types():
+    """Get all the content types we know about"""
+    return sorted(known_content_types)
 
 # What field types does our CMS support?
 FIELD_TYPES = ["text", "file", "number", "boolean", "date"]

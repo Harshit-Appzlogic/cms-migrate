@@ -1,166 +1,210 @@
-"""
-Simple HTML parser that finds interesting content sections
-"""
-from typing import List
 from pathlib import Path
 import re
-
 from bs4 import BeautifulSoup, Tag
 
 
-class HTMLParser:
-    """Finds interesting content in HTML files"""
+def find_content_sections(html_file: Path) -> list:
+    """Find interesting content in an HTML file with hierarchical detection"""
+    try:
+        with open(html_file, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        
+        soup = BeautifulSoup(html_content, 'html.parser')
+        sections = []
+        
+        # Step 1: Find top-level containers
+        top_level_selectors = ['nav', 'form', 'header', 'footer', 'aside']
+        
+        for selector in top_level_selectors:
+            elements = soup.select(selector)
+            for element in elements:
+                if looks_like_content(element):
+                    sections.append(element)
+        
+        # Step 2: Hierarchical content extraction from main content areas
+        main_areas = soup.select('main, article, section, div.content, [id*="content"]')
+        
+        for main_area in main_areas:
+            if main_area and len(main_area.get_text(strip=True)) > 200:
+                # Extract nested components from main content
+                nested_sections = extract_nested_components(main_area)
+                sections.extend(nested_sections)
+        
+        # Step 3: If still not enough, look for standalone content divs
+        if len(sections) < 5:
+            content_divs = soup.find_all('div')
+            for div in content_divs:
+                if looks_like_standalone_content(div) and div not in sections:
+                    sections.append(div)
+        
+        # Remove duplicates and limit results
+        unique_sections = []
+        seen_elements = set()
+        
+        for section in sections:
+            element_id = id(section)
+            if element_id not in seen_elements:
+                unique_sections.append(section)
+                seen_elements.add(element_id)
+        
+        return unique_sections[:20]  # Increased limit for more component diversity
+        
+    except Exception as e:
+        print(f"Couldn't read {html_file}: {e}")
+        return []
+
+
+def extract_nested_components(main_area) -> list:
+    """Extract individual components from within main content areas"""
+    components = []
     
-    def __init__(self):
-        # What HTML elements usually contain interesting content?
-        self.content_selectors = [
-            'article', 'section', 'main', 'div.content', 'div.recipe', 
-            'div.article', 'div.teaser', 'div.banner', 'nav', 'form',
-            'header', 'aside', '.component', '.widget'
-        ]
-        
-        # Skip these - they're usually not content
-        self.skip_patterns = [
-            r'^\s*menu\s*$', r'^\s*navigation\s*$', r'^\s*footer\s*$',
-            r'^\s*header\s*$', r'^\s*copyright\s*$', r'^\s*login\s*$'
-        ]
+    # Look for semantic content patterns
+    content_patterns = {
+        'headline_sections': ['h1', 'h2', 'h3', '.headline', '[class*="title"]', '[class*="header"]'],
+        'article_sections': ['article', '.article', '[class*="story"]', '[class*="post"]'],
+        'recipe_sections': ['[class*="recipe"]', '[data-recipe]', '[id*="recipe"]'],
+        'member_sections': ['[class*="member"]', '[id*="member"]', '[class*="user"]'],
+        'banner_sections': ['[class*="banner"]', '[class*="promo"]', '[class*="hero"]'],
+        'card_sections': ['[class*="card"]', '[class*="tile"]', '[class*="item"]'],
+        'list_sections': ['ul', 'ol', '[class*="list"]']
+    }
     
-    def find_content_sections(self, html_file: Path) -> List[Tag]:
-        """Find all the interesting content sections in an HTML file"""
-        try:
-            with open(html_file, 'r', encoding='utf-8') as f:
-                html_content = f.read()
-            
-            soup = BeautifulSoup(html_content, 'html.parser')
-            sections = []
-            
-            # Try our known selectors first
-            for selector in self.content_selectors:
-                elements = soup.select(selector)
-                for element in elements:
-                    if self._looks_like_content(element):
-                        sections.append(element)
-            
-            # If we didn't find much, try looking at divs
-            if len(sections) < 3:
-                for div in soup.find_all('div'):
-                    if self._looks_like_content(div):
-                        sections.append(div)
-            
-            # Don't return too many - it gets overwhelming
-            return sections[:15]
-            
-        except Exception as e:
-            print(f"Couldn't read {html_file}: {e}")
-            return []
+    # Extract components by pattern
+    for pattern_type, selectors in content_patterns.items():
+        for selector in selectors:
+            elements = main_area.select(selector)
+            for element in elements:
+                if looks_like_component(element):
+                    components.append(element)
     
-    def _looks_like_content(self, element: Tag) -> bool:
-        """Does this element look like it contains real content?"""
-        text = element.get_text(strip=True)
-        
-        # Too short or too long probably isn't useful
-        if len(text) < 50 or len(text) > 3000:
-            return False
-        
-        # Need enough words to be meaningful
-        words = text.split()
-        if len(words) < 10:
-            return False
-        
-        # Skip obvious navigation/footer stuff
-        text_lower = text.lower()
-        for pattern in self.skip_patterns:
-            if re.match(pattern, text_lower):
-                return False
-        
+    # Look for content blocks - divs with substantial content
+    content_divs = main_area.find_all('div', recursive=True)
+    for div in content_divs:
+        if looks_like_content_block(div) and div not in components:
+            components.append(div)
+    
+    return components[:15]  # Limit nested components per main area
+
+
+def looks_like_component(element) -> bool:
+    """Check if element looks like a reusable component"""
+    if not element or not hasattr(element, 'get_text'):
+        return False
+    
+    text = element.get_text(strip=True)
+    
+    # Component size filters
+    if len(text) < 20 or len(text) > 2000:
+        return False
+    
+    words = text.split()
+    if len(words) < 3:
+        return False
+    
+    # Component indicators
+    classes = element.get('class', [])
+    element_id = element.get('id', '')
+    
+    # Has meaningful classes or ID
+    if classes or element_id:
         return True
+    
+    # Has semantic content
+    if element.find(['h1', 'h2', 'h3', 'h4', 'img', 'a', 'button']):
+        return True
+    
+    # Has structured content
+    if len(element.find_all(['p', 'li', 'span'])) >= 2:
+        return True
+    
+    return False
 
 
-class ContentExtractor:
-    """Extracts specific types of content from HTML sections"""
+def looks_like_content_block(element) -> bool:
+    """Check if div looks like a meaningful content block"""
+    if not element or element.name != 'div':
+        return False
     
-    def get_title(self, section: Tag) -> str:
-        """Try to find a title in this section"""
-        # Look for heading tags first
-        for heading in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-            element = section.find(heading)
+    text = element.get_text(strip=True)
+    
+    # Content block filters
+    if len(text) < 50 or len(text) > 1500:
+        return False
+    
+    words = text.split()
+    if len(words) < 8 or len(words) > 300:
+        return False
+    
+    # Skip navigation-like content
+    text_lower = text.lower()
+    nav_words = ['menu', 'navigation', 'footer', 'copyright', 'privacy', 'cookie']
+    if any(word in text_lower for word in nav_words):
+        return False
+    
+    # Must have some structure
+    children = element.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'img', 'a', 'button', 'span'], recursive=False)
+    if len(children) < 2:
+        return False
+    
+    return True
+
+
+def looks_like_standalone_content(element) -> bool:
+    """Check if element is standalone content worth extracting"""
+    if not element or not hasattr(element, 'get_text'):
+        return False
+    
+    text = element.get_text(strip=True)
+    
+    # Size filters
+    if len(text) < 100 or len(text) > 3000:
+        return False
+    
+    words = text.split()
+    if len(words) < 15:
+        return False
+    
+    # Skip obvious utility content
+    text_lower = text.lower()
+    skip_patterns = ['cookie', 'privacy', 'terms', 'copyright', 'all rights reserved']
+    if any(pattern in text_lower for pattern in skip_patterns):
+        return False
+    
+    return True
+
+
+def looks_like_content(element: Tag) -> bool:
+    """Does this look like real content?"""
+    text = element.get_text(strip=True)
+    
+    # Too short or too long isn't useful
+    if len(text) < 50 or len(text) > 3000:
+        return False
+    
+    # Need enough words
+    words = text.split()
+    if len(words) < 10:
+        return False
+    
+    # Skip obvious junk (but allow navigation content)
+    text_lower = text.lower()
+    skip_words = ['footer', 'copyright', 'login', 'cookie policy', 'privacy policy']
+    if any(word in text_lower for word in skip_words):
+        return False
+    
+    return True
+
+
+def get_fallback_text(section: Tag, field_name: str) -> str:
+    """Simple fallback if AI doesn't find field value"""
+    field_name = field_name.lower()
+    
+    # Title-like fields
+    if field_name in ['title', 'heading', 'name']:
+        for tag in ['h1', 'h2', 'h3', '.title']:
+            element = section.find(tag) if tag.startswith('h') else section.select_one(tag)
             if element:
                 return element.get_text(strip=True)
-        
-        # Look for things that look like titles
-        for selector in ['.title', '.heading', '.recipe-title', '[class*="title"]']:
-            element = section.select_one(selector)
-            if element:
-                return element.get_text(strip=True)
-        
-        # Give up - no title found
-        return ""
     
-    def get_description(self, section: Tag) -> str:
-        """Try to find a description or main content"""
-        # Look for paragraphs
-        paragraphs = section.find_all('p')
-        if paragraphs:
-            return ' '.join([p.get_text(strip=True) for p in paragraphs])
-        
-        # Look for description-like classes
-        for selector in ['.description', '.content', '.summary', '[class*="desc"]']:
-            element = section.select_one(selector)
-            if element:
-                return element.get_text(strip=True)
-        
-        # Just return the text we have
-        return section.get_text(strip=True)[:500]
-    
-    def get_image_url(self, section: Tag) -> str:
-        """Try to find an image in this section"""
-        img = section.find('img')
-        if img and img.get('src'):
-            return img.get('src')
-        return ""
-    
-    def get_link_url(self, section: Tag) -> str:
-        """Try to find a link in this section"""
-        link = section.find('a')
-        if link and link.get('href'):
-            return link.get('href')
-        return ""
-    
-    def get_ingredients(self, section: Tag) -> List[str]:
-        """Try to find ingredients (for recipes)"""
-        ingredients = []
-        
-        # Look for lists that might be ingredients
-        for list_element in section.find_all(['ul', 'ol']):
-            if self._looks_like_ingredients(list_element):
-                for item in list_element.find_all('li'):
-                    ingredients.append(item.get_text(strip=True))
-        
-        return ingredients
-    
-    def _looks_like_ingredients(self, list_element: Tag) -> bool:
-        """Does this list look like it contains ingredients?"""
-        text = list_element.get_text().lower()
-        # Look for cooking-related words
-        cooking_words = ['cup', 'tbsp', 'tsp', 'oz', 'lb', 'gram', 'kg', 'ml', 'liter']
-        return any(word in text for word in cooking_words)
-    
-    def get_field_value(self, section: Tag, field_name: str) -> str:
-        """Try to extract a specific field from this section"""
-        field_name = field_name.lower()
-        
-        # Map field names to extraction methods
-        if field_name in ['title', 'heading', 'name']:
-            return self.get_title(section)
-        elif field_name in ['description', 'content', 'body', 'text']:
-            return self.get_description(section)
-        elif field_name in ['image', 'img', 'photo']:
-            return self.get_image_url(section)
-        elif field_name in ['link', 'url', 'href']:
-            return self.get_link_url(section)
-        elif field_name == 'ingredients':
-            ingredients = self.get_ingredients(section)
-            return '\n'.join(ingredients) if ingredients else ""
-        else:
-            # Default: just return some text
-            return section.get_text(strip=True)[:200]
+    # Just return some text
+    return section.get_text(strip=True)[:200]

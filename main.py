@@ -1,7 +1,3 @@
-#!/usr/bin/env python3
-"""
-Main entry point for the CMS Migration System
-"""
 import sys
 import os
 from pathlib import Path
@@ -12,7 +8,6 @@ from migration_system import MigrationSystem
 console = Console()
 
 def main():
-    """Main entry point for CMS Migration System"""
     
     # Check if COHERE_API_KEY is set
     if not os.getenv("COHERE_API_KEY"):
